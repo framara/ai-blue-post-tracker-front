@@ -215,6 +215,11 @@ body {
   padding-top: 2rem;
 }
 
+/* When the search bar is docked (compact) we need extra top padding so first card isn't hidden under it */
+.posts-section.compact-offset {
+  padding-top: 9rem; /* search bar height (~60px) + comfortable spacing */
+}
+
 .posts-container {
   max-width: 800px;
   margin: 0 auto;

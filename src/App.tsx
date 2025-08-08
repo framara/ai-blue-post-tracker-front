@@ -55,6 +55,10 @@ function App() {
   const [showAutocomplete, setShowAutocomplete] = useState(false);
   const [posts, setPosts] = useState<BluePost[]>([]);
   const [displayedPosts, setDisplayedPosts] = useState<BluePost[]>([]);
+  // Extract snippets (search mode)
+  interface ExtractSnippet { id: string; bluePostId: string; postedAt: string; extractText: string; highlightedExtractHtml?: string; matchedTerms?: string[]; rankScore?: number; postTitle: string; authorName: string; forumCategory: string; sourceUrl?: string; sequence?: number; }
+  const [displayedExtracts, setDisplayedExtracts] = useState<ExtractSnippet[]>([]);
+  const [isSearchMode, setIsSearchMode] = useState(false);
   const [showPosts, setShowPosts] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [currentPage, setCurrentPage] = useState(1);
@@ -224,41 +228,37 @@ function App() {
   };
 
   const loadMorePosts = () => {
-    if (!showPosts) {
-      // Load more from the latest posts
-      const nextBatch = posts.slice(displayedPosts.length, displayedPosts.length + 10);
-      if (nextBatch.length > 0) {
-        setDisplayedPosts(prev => [...prev, ...nextBatch]);
-      } else if (hasMorePosts) {
-        loadLatestPosts(currentPage);
-      }
-    } else {
-      // Load more search results
-      searchPosts(searchQuery, currentPage);
+    if (isSearchMode) {
+      searchExtracts(searchQuery, currentPage);
+      return;
+    }
+    // Load more from latest posts
+    const nextBatch = posts.slice(displayedPosts.length, displayedPosts.length + POSTS_PER_PAGE);
+    if (nextBatch.length > 0) {
+      setDisplayedPosts(prev => [...prev, ...nextBatch]);
+    } else if (hasMorePosts) {
+      loadLatestPosts(currentPage);
     }
   };
 
-  const searchPosts = async (topic: string, page: number = 1) => {
+  const searchExtracts = async (topic: string, page: number = 1) => {
     if (isLoading) return;
     
     setIsLoading(true);
     try {
-      const response = await fetch(`${API_BASE_URL}/BluePosts?search=${encodeURIComponent(topic)}&page=${page}&pageSize=${POSTS_PER_PAGE}`);
+      const response = await fetch(`${API_BASE_URL}/Extracts?query=${encodeURIComponent(topic)}&page=${page}&pageSize=${POSTS_PER_PAGE}`);
       if (response.ok) {
-        let searchResults: BluePost[] = await response.json();
-        searchResults = searchResults.sort((a,b) => new Date(b.postedAt).getTime() - new Date(a.postedAt).getTime());
-        
+        const snippets: ExtractSnippet[] = await response.json();
         if (page === 1) {
-          setDisplayedPosts(searchResults);
+          setDisplayedExtracts(snippets);
         } else {
-          setDisplayedPosts(prev => [...prev, ...searchResults]);
+          setDisplayedExtracts(prev => [...prev, ...snippets]);
         }
-        
         setCurrentPage(page + 1);
-        setHasMorePosts(searchResults.length === POSTS_PER_PAGE);
+        setHasMorePosts(snippets.length === POSTS_PER_PAGE);
       }
     } catch (error) {
-      console.error('Error searching posts:', error);
+      console.error('Error searching extracts:', error);
     } finally {
       setIsLoading(false);
     }
@@ -268,8 +268,9 @@ function App() {
     setSearchQuery(topic);
     setShowAutocomplete(false);
     setShowPosts(true);
+    setIsSearchMode(true);
     setCurrentPage(1);
-    searchPosts(topic, 1);
+    searchExtracts(topic, 1);
     searchInputRef.current?.blur();
   };
 
@@ -358,14 +359,42 @@ function App() {
       {/* Posts with parallax fade / lag */}
       {/** Posts only start fading in once hero fully docked to prevent overlap */}
       <div
-        className={`posts-section ${progress >= 1 ? 'visible' : 'hidden'}`}
+  className={`posts-section ${progress >= 1 ? 'visible compact-offset' : 'hidden'}`}
         style={{
           opacity: progress >= 1 ? 1 : 0,
           transform: progress >= 1 ? 'translateY(0)' : 'translateY(40px)'
         }}
       >
         <div className="posts-container">
-          {displayedPosts.map((post, index) => (
+          {isSearchMode ? displayedExtracts.map((snip, index) => (
+            <article key={`${snip.id}-${index}`} className="post-card" style={{ animationDelay: `${index * 40}ms` }}>
+              <div className="post-header">
+                <div className="post-meta">
+                  <span className="post-author">{snip.authorName}</span>
+                  <span className="post-region">{snip.forumCategory}</span>
+                </div>
+                <div className="post-date">
+                  <span className="date">{formatDate(snip.postedAt)}</span>
+                  <span className="time">{formatTime(snip.postedAt)}</span>
+                </div>
+              </div>
+              <h3 className="post-title">
+                <a href={snip.sourceUrl} target="_blank" rel="noopener noreferrer">{snip.postTitle}</a>
+              </h3>
+              <div className="post-content">
+                <p dangerouslySetInnerHTML={{ __html: snip.highlightedExtractHtml || snip.extractText }} />
+              </div>
+              <div className="post-footer">
+                <span className="post-category">Extract</span>
+                <div className="post-tags">
+                  <span className="tag">Snippet</span>
+                  {snip.matchedTerms && snip.matchedTerms.slice(0,3).map(t => (
+                    <span key={t} className="tag accent">{t}</span>
+                  ))}
+                </div>
+              </div>
+            </article>
+          )) : displayedPosts.map((post, index) => (
             <article
               key={`${post.id}-${index}`}
               className="post-card"
@@ -393,7 +422,7 @@ function App() {
             </article>
           ))}
           {isLoading && (
-            <div className="loading-indicator"><div className="loading-spinner"></div><p>Loading more posts...</p></div>
+            <div className="loading-indicator"><div className="loading-spinner"></div><p>Loading more {isSearchMode ? 'extracts' : 'posts'}...</p></div>
           )}
           {!hasMorePosts && displayedPosts.length > 0 && (
             <div className="end-message"><p>You've reached the end!</p></div>
