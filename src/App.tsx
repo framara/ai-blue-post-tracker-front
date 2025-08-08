@@ -6,11 +6,12 @@ interface Author { id: string; name: string; role?: string; }
 interface Region { id: number; name: string; }
 interface ForumCategory { id: number; name: string; }
 interface BluePost { id: string; title: string; content: string; summary?: string; sourceUrl: string; postedAt: string; author: Author; region: Region; forumCategory: ForumCategory; }
-interface ExtractSnippet { id: string; bluePostId: string; postedAt: string; extractText: string; highlightedExtractHtml?: string; matchedTerms?: string[]; postTitle: string; authorName: string; forumCategory: string; sourceUrl?: string; }
+interface ExtractSnippet { id: string; bluePostId: string; postedAt: string; extractText: string; highlightedExtractHtml?: string; sectionSnippetHtml?: string; isSectionFragment?: boolean; matchedTerms?: string[]; postTitle: string; authorName: string; forumCategory: string; sourceUrl?: string; }
 
 const API_BASE_URL = 'http://localhost:5289/api';
 const PAGE_SIZE = 10;
-const HERO_TRANSITION_PX = 320; // Scroll distance to fully compact
+const HERO_TRANSITION_PX = 120; // Total reference distance
+const DOCK_PROGRESS = 0.65; // Fraction of full distance at which we dock to top (earlier docking)
 
 function App() {
   // Data state
@@ -82,25 +83,36 @@ function App() {
   // Infinite scroll for pagination
   useEffect(()=>{ const onScroll=()=>{ if (isLoading) return; const {scrollTop,clientHeight,scrollHeight}=document.documentElement; if (scrollTop+clientHeight>=scrollHeight-200) loadMore(); }; window.addEventListener('scroll',onScroll,{passive:true}); return ()=>window.removeEventListener('scroll',onScroll); },[isLoading,displayedPosts,posts,hasMorePosts,currentPage,isSearchMode]);
 
-  const runExtractSearch = async (q:string, page:number)=>{ setIsLoading(true); try { const r = await fetch(`${API_BASE_URL}/Extracts?query=${encodeURIComponent(q)}&page=${page}&pageSize=${PAGE_SIZE}`); if (r.ok) { setDisplayedExtracts(await r.json()); } } finally { setIsLoading(false);} };
+  const runExtractSearch = async (q:string, page:number)=>{
+    setIsLoading(true);
+    try {
+      // Always request section fragments so class/spec queries narrow properly
+      const url = `${API_BASE_URL}/Extracts?query=${encodeURIComponent(q)}&page=${page}&pageSize=${PAGE_SIZE}&section=true`;
+      const r = await fetch(url);
+      if (r.ok) {
+        const data: ExtractSnippet[] = await r.json();
+        setDisplayedExtracts(data);
+      }
+    } finally { setIsLoading(false);} };
   const handleTopicSelect = (t:string) => { setSearchQuery(t); setIsSearchMode(true); setCurrentPage(1); runExtractSearch(t,1); setShowAutocomplete(false); };
   const handleKeyDown=(e:React.KeyboardEvent)=>{ if(e.key==='Enter' && filteredTopics.length>0) handleTopicSelect(filteredTopics[0]); if(e.key==='Escape'){ setShowAutocomplete(false); searchInputRef.current?.blur(); } };
   const formatDate=(d:string)=>new Date(d).toLocaleDateString();
   const formatTime=(d:string)=>new Date(d).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
 
   // Parallax calculations
-  const rawProgress = Math.min(1, scrollY / HERO_TRANSITION_PX);
-  const eased = rawProgress < 1 ? Math.pow(rawProgress, 0.85) : 1; // ease-out-ish
-  const scale = 1 - 0.4 * eased; // 1 -> 0.6
-  const compact = eased >= 1;
+  const rawProgress = Math.min(1, scrollY / HERO_TRANSITION_PX);            // 0..1 over full reference
+  const dockProgress = Math.min(1, rawProgress / DOCK_PROGRESS);            // 0..1 by the time we dock
+  const eased = dockProgress < 1 ? Math.pow(dockProgress, 0.85) : 1;        // eased pre-dock motion
+  const compact = rawProgress >= DOCK_PROGRESS;                             // dock earlier
+  const scale = 1 - 0.4 * eased;                                            // scale relative to dock progress
 
   const searchWrapperStyle: React.CSSProperties = { '--progress': eased.toString() } as any;
   const searchInnerStyle: React.CSSProperties = { transform: `scale(${scale.toFixed(3)})`, transformOrigin: 'center center' };
 
-  // Dynamic padding so first post never gets hidden. While hero active we keep large vh padding, then switch to compact top padding.
-  const postsPaddingTop = compact ? '9rem' : `calc(${(1 - eased) * 100}vh + 2rem)`; // 9rem when docked
-  const postsOpacity = Math.min(1, eased * 1.4); // fade in earlier than full collapse
-  const postsTranslate = 40 * (1 - eased); // slide up
+  // Dynamic padding so first post never gets hidden. Shrinks faster (uses dockProgress) and docks at 9rem sooner.
+  const postsPaddingTop = compact ? '9rem' : `calc(${(1 - dockProgress) * 100}vh + 2rem)`;
+  const postsOpacity = Math.min(1, dockProgress * 1.4);
+  const postsTranslate = 40 * (1 - dockProgress);
   const postsSectionStyle: React.CSSProperties = {
     paddingTop: postsPaddingTop,
     opacity: postsOpacity,
@@ -132,7 +144,7 @@ function App() {
       </div>
 
       {/* Scroll hint only at top & not searching */}
-      {rawProgress === 0 && !isSearchMode && (
+  {rawProgress === 0 && !isSearchMode && (
         <div className="scroll-hint"><div className="v-arrow">∨</div></div>
       )}
 
@@ -146,7 +158,10 @@ function App() {
                 <div className="post-date"><span className="date">{formatDate(snip.postedAt)}</span><span className="time">{formatTime(snip.postedAt)}</span></div>
               </div>
               <h3 className="post-title"><a href={snip.sourceUrl} target="_blank" rel="noreferrer">{snip.postTitle}</a></h3>
-              <div className="post-content"><p dangerouslySetInnerHTML={{__html: snip.highlightedExtractHtml || snip.extractText}} /></div>
+              <div className="post-content"><p dangerouslySetInnerHTML={{__html: snip.sectionSnippetHtml || snip.highlightedExtractHtml || snip.extractText}} /></div>
+              {snip.isSectionFragment && (
+                <div style={{marginTop:'0.5rem', fontSize:'0.7rem', letterSpacing:'0.05em', opacity:0.6}}>Class Fragment</div>
+              )}
               <div className="post-footer"><span className="post-category">Extract</span><div className="post-tags"><span className="tag">Snippet</span></div></div>
             </article>
           )) : displayedPosts.map((post,i)=>(
