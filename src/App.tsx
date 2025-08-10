@@ -1,12 +1,12 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect } from 'react';
 import './App.css';
+import type { FragmentResult, FragmentScope } from './types/api';
 
-// Types
+// Types for legacy feed rendering
 interface Author { id: string; name: string; role?: string; }
 interface Region { id: number; name: string; }
 interface ForumCategory { id: number; name: string; }
 interface BluePost { id: string; title: string; content: string; summary?: string; sourceUrl: string; postedAt: string; author: Author; region: Region; forumCategory: ForumCategory; }
-interface ExtractSnippet { id: string; bluePostId: string; postedAt: string; extractText: string; highlightedExtractHtml?: string; sectionSnippetHtml?: string; isSectionFragment?: boolean; matchedTerms?: string[]; postTitle: string; authorName: string; forumCategory: string; sourceUrl?: string; }
 
 const API_BASE_URL = 'http://localhost:5289/api';
 const PAGE_SIZE = 10;
@@ -16,39 +16,27 @@ const DOCK_PROGRESS = 0.65; // Fraction of full distance at which we dock to top
 function App() {
   // Data state
   const [searchQuery, setSearchQuery] = useState('');
-  const [topics, setTopics] = useState<string[]>([]);
-  const [filteredTopics, setFilteredTopics] = useState<string[]>([]);
-  const [showAutocomplete, setShowAutocomplete] = useState(false);
   const [posts, setPosts] = useState<BluePost[]>([]);
   const [displayedPosts, setDisplayedPosts] = useState<BluePost[]>([]);
-  const [displayedExtracts, setDisplayedExtracts] = useState<ExtractSnippet[]>([]);
+  const [fragments, setFragments] = useState<FragmentResult[]>([]);
+  const [fragmentNextOffset, setFragmentNextOffset] = useState<number | null>(null);
+  const [fragmentTotal, setFragmentTotal] = useState<number>(0);
   const [isSearchMode, setIsSearchMode] = useState(false);
   const [currentPage, setCurrentPage] = useState(1);
   const [hasMorePosts, setHasMorePosts] = useState(true);
   const [isLoading, setIsLoading] = useState(false);
+  const [scope, setScope] = useState<FragmentScope>('any');
+  const [dedupe, setDedupe] = useState(true);
 
   // Parallax state
   const [scrollY, setScrollY] = useState(0);
-  const searchInputRef = useRef<HTMLInputElement>(null);
 
-  // Load topics once
-  useEffect(() => { (async () => {
-    try {
-      const r = await fetch(`${API_BASE_URL}/topics`);
-      if (r.ok) { setTopics(await r.json()); return; }
-    } catch {}
-    setTopics(['Balance Changes','Bug Fixes','Class Updates','Hotfixes','Season Updates','Server Issues','Technical Issues']);
-  })(); }, []);
+  // No topic suggestions; we search whatever the user types
 
   // Initial posts
   useEffect(() => { loadPosts(1); }, []);
 
-  // Autocomplete filtering
-  useEffect(() => {
-    if (!searchQuery) { setFilteredTopics([]); setShowAutocomplete(false); return; }
-    const f = topics.filter(t=>t.toLowerCase().includes(searchQuery.toLowerCase())).slice(0,5);
-    setFilteredTopics(f); setShowAutocomplete(f.length>0);
-  }, [searchQuery, topics]);
+  // No autocomplete filtering
 
   // Scroll listener for parallax
   useEffect(()=>{
@@ -83,21 +71,78 @@ function App() {
   // Infinite scroll for pagination
   useEffect(()=>{ const onScroll=()=>{ if (isLoading) return; const {scrollTop,clientHeight,scrollHeight}=document.documentElement; if (scrollTop+clientHeight>=scrollHeight-200) loadMore(); }; window.addEventListener('scroll',onScroll,{passive:true}); return ()=>window.removeEventListener('scroll',onScroll); },[isLoading,displayedPosts,posts,hasMorePosts,currentPage,isSearchMode]);
 
-  const runExtractSearch = async (q:string, page:number)=>{
+  const runFragmentSearch = async (q:string, offset:number=0, append:boolean=false)=>{
     setIsLoading(true);
     try {
-      // Always request section fragments so class/spec queries narrow properly
-      const url = `${API_BASE_URL}/Extracts?query=${encodeURIComponent(q)}&page=${page}&pageSize=${PAGE_SIZE}&section=true`;
-      const r = await fetch(url);
+      const params = new URLSearchParams();
+      params.set('query', q);
+      params.set('limit', String(PAGE_SIZE));
+      params.set('dedupe', String(dedupe));
+      params.set('offset', String(offset));
+      if (scope && scope !== 'any') params.set('scope', scope);
+      const r = await fetch(`${API_BASE_URL}/search/fragments?${params.toString()}`);
       if (r.ok) {
-        const data: ExtractSnippet[] = await r.json();
-        setDisplayedExtracts(data);
+        const nextRaw = r.headers.get('X-Next-Offset');
+        const totalRaw = r.headers.get('X-Total-Count');
+        const next = nextRaw && nextRaw.trim() !== '' ? Number(nextRaw) : null;
+        const total = totalRaw ? Number(totalRaw) : 0;
+        const data: FragmentResult[] = await r.json();
+        setFragmentNextOffset(next);
+        setFragmentTotal(total);
+        setFragments(prev => append ? [...prev, ...data] : data);
       }
     } finally { setIsLoading(false);} };
-  const handleTopicSelect = (t:string) => { setSearchQuery(t); setIsSearchMode(true); setCurrentPage(1); runExtractSearch(t,1); setShowAutocomplete(false); };
-  const handleKeyDown=(e:React.KeyboardEvent)=>{ if(e.key==='Enter' && filteredTopics.length>0) handleTopicSelect(filteredTopics[0]); if(e.key==='Escape'){ setShowAutocomplete(false); searchInputRef.current?.blur(); } };
+  const handleSearchSubmit = () => {
+    const q = searchQuery.trim();
+    if (!q) {
+      setIsSearchMode(false);
+      setFragments([]);
+      setFragmentNextOffset(null);
+      setFragmentTotal(0);
+      return;
+    }
+    setIsSearchMode(true);
+    setCurrentPage(1);
+    setFragments([]);
+    setFragmentNextOffset(null);
+    setFragmentTotal(0);
+    runFragmentSearch(q, 0, false);
+  };
+  const handleKeyDown=(e:React.KeyboardEvent)=>{ if(e.key==='Enter'){ handleSearchSubmit(); } };
   const formatDate=(d:string)=>new Date(d).toLocaleDateString();
   const formatTime=(d:string)=>new Date(d).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+
+  // Transform plain-text-ish HTML (with <mark>) into Blizzard-like markup:
+  // - Lines ending with ':' or matching known section names become subheadings
+  // - Lines starting with •, -, or * become list items grouped into <ul>
+  // - Other lines become paragraphs
+  const transformToBlizzHtml = (html: string) => {
+    const text = html.replace(/\r/g, '');
+    const lines = text.split('\n');
+    const out: string[] = [];
+    let inList = false;
+    const isBullet = (line: string) => /^\s*[•\-*]\s+/.test(line);
+    const isSection = (line: string) => /[:：]\s*$/.test(line) || /^(Classes|Delves|Items|Quests|Dungeons|Raids|Player versus Player|PvP)\b/i.test(line.trim());
+    for (let raw of lines) {
+      const line = raw.trim();
+      if (!line) { continue; }
+      if (isBullet(line)) {
+        if (!inList) { out.push('<ul class="blizz-list">'); inList = true; }
+        const content = line.replace(/^\s*[•\-*]\s+/, '');
+        out.push(`<li>${content}</li>`);
+        continue;
+      }
+      if (inList) { out.push('</ul>'); inList = false; }
+      if (isSection(line)) {
+        const title = line.replace(/[:：]\s*$/, '');
+        out.push(`<h4 class="blizz-subheading">${title}</h4>`);
+      } else {
+        out.push(`<p>${line}</p>`);
+      }
+    }
+    if (inList) out.push('</ul>');
+    return out.join('\n');
+  };
 
   // Parallax calculations
   const rawProgress = Math.min(1, scrollY / HERO_TRANSITION_PX);            // 0..1 over full reference
@@ -126,19 +171,13 @@ function App() {
         <div className="search-parallax-core" style={searchInnerStyle}>
           <div className="search-container">
             <input
-              ref={searchInputRef}
               type="text"
               className="search-input"
-              placeholder="Search topics..."
+              placeholder="Search…"
               value={searchQuery}
-              onChange={(e)=>{ setSearchQuery(e.target.value); if(isSearchMode && !e.target.value){ setIsSearchMode(false); setDisplayedExtracts([]);} }}
+              onChange={(e)=>{ setSearchQuery(e.target.value); if(isSearchMode && !e.target.value){ setIsSearchMode(false); setFragments([]); setFragmentNextOffset(null); setFragmentTotal(0); } }}
               onKeyDown={handleKeyDown}
             />
-            {showAutocomplete && filteredTopics.length>0 && (
-              <ul className="autocomplete-dropdown">
-                {filteredTopics.map((t,i)=>(<li key={i} className="autocomplete-item" onClick={()=>handleTopicSelect(t)}>{t}</li>))}
-              </ul>
-            )}
           </div>
         </div>
       </div>
@@ -151,18 +190,37 @@ function App() {
       {/* Posts Section */}
       <div className={`posts-section visible ${compact ? 'compact-offset' : ''}`} style={postsSectionStyle}>
         <div className="posts-container">
-          {isSearchMode ? displayedExtracts.map((snip,i)=>(
-            <article key={snip.id} className="post-card" style={{animationDelay:`${i*40}ms`}}>
-              <div className="post-header">
-                <div className="post-meta"><span className="post-author">{snip.authorName}</span><span className="post-region">{snip.forumCategory}</span></div>
-                <div className="post-date"><span className="date">{formatDate(snip.postedAt)}</span><span className="time">{formatTime(snip.postedAt)}</span></div>
+          {/* Filters for fragments */}
+          {isSearchMode && (
+            <div style={{display:'flex', alignItems:'center', gap:'0.5rem', marginBottom:'0.75rem'}}>
+              <div style={{display:'flex', gap:'0.25rem'}}>
+                {(['any','retail','ptr','classic'] as FragmentScope[]).map(s => (
+                  <button key={s} className={`chip ${scope===s?'active':''}`} onClick={()=>{ setScope(s); if(searchQuery){ setFragments([]); setFragmentNextOffset(null); setFragmentTotal(0); runFragmentSearch(searchQuery, 0, false); } }}>
+                    {s.toUpperCase()}
+                  </button>
+                ))}
               </div>
-              <h3 className="post-title"><a href={snip.sourceUrl} target="_blank" rel="noreferrer">{snip.postTitle}</a></h3>
-              <div className="post-content"><p dangerouslySetInnerHTML={{__html: snip.sectionSnippetHtml || snip.highlightedExtractHtml || snip.extractText}} /></div>
-              {snip.isSectionFragment && (
-                <div style={{marginTop:'0.5rem', fontSize:'0.7rem', letterSpacing:'0.05em', opacity:0.6}}>Class Fragment</div>
-              )}
-              <div className="post-footer"><span className="post-category">Extract</span><div className="post-tags"><span className="tag">Snippet</span></div></div>
+              <label style={{display:'flex', alignItems:'center', gap:'0.25rem', marginLeft:'auto'}}>
+                <input type="checkbox" checked={dedupe} onChange={(e)=>{ setDedupe(e.target.checked); if(searchQuery){ setFragments([]); setFragmentNextOffset(null); setFragmentTotal(0); runFragmentSearch(searchQuery, 0, false); } }} />
+                Dedupe regions
+              </label>
+            </div>
+          )}
+          {isSearchMode ? fragments.map((frag,i)=>(
+            <article key={frag.id ?? i} className="post-card blizz-post" style={{animationDelay:`${i*40}ms`}}>
+              <div className="post-header">
+                <div className="post-meta"><span className="post-author">{frag.region}</span><span className="post-region">{frag.scope ?? 'Retail'}</span></div>
+                <div className="post-date"><span className="date">{formatDate(frag.postedAt)}</span><span className="time">{formatTime(frag.postedAt)}</span></div>
+              </div>
+              <h3 className="post-title"><a href={frag.sourceUrl} target="_blank" rel="noreferrer">{frag.postTitle}</a></h3>
+              <div className="post-content blizz-content" dangerouslySetInnerHTML={{__html: transformToBlizzHtml(frag.textHtml)}} />
+              <div className="post-footer">
+                <span className="post-category">Fragment</span>
+                <div className="post-tags">
+                  {frag.isPvP && <span className="tag" style={{background:'#8B0000', color:'#fff'}}>PvP</span>}
+                  <span className="tag">Newest</span>
+                </div>
+              </div>
             </article>
           )) : displayedPosts.map((post,i)=>(
             <article key={post.id} className="post-card" style={{animationDelay:`${i*40}ms`}}>
@@ -175,6 +233,18 @@ function App() {
               <div className="post-footer"><span className="post-category">{post.forumCategory.name}</span><div className="post-tags"><span className="tag">Blue Post</span></div></div>
             </article>
           ))}
+          {isSearchMode && !isLoading && fragmentNextOffset !== null && (
+            <div style={{textAlign:'center',margin:'1rem 0'}}>
+              <button className="load-more-button" onClick={()=> runFragmentSearch(searchQuery, fragmentNextOffset ?? 0, true)}>
+                Load more results
+              </button>
+              {fragmentTotal > 0 && (
+                <div style={{marginTop:'0.5rem', fontSize:'0.9rem', color:'#666'}}>
+                  Showing {fragments.length} of {fragmentTotal}
+                </div>
+              )}
+            </div>
+          )}
           {isLoading && <div className="loading-indicator"><div className="loading-spinner"/><p>Loading...</p></div>}
           {!isSearchMode && !isLoading && hasMorePosts && (
             <div style={{textAlign:'center',margin:'2rem 0'}}>

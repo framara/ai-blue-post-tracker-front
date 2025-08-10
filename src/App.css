@@ -362,6 +362,42 @@ body {
   font-weight: 300;
 }
 
+/* Blizzard-like content styling */
+.blizz-post {
+  border-left: 3px solid rgba(0, 174, 255, 0.5);
+}
+.blizz-content {
+  color: #cfefff;
+}
+.blizz-content h4.blizz-subheading {
+  font-size: 1.05rem;
+  color: #ffffff;
+  margin: 1.25rem 0 0.5rem;
+  font-weight: 600;
+}
+.blizz-content ul.blizz-list {
+  list-style: none;
+  margin: 0.4rem 0 0.8rem 0.25rem;
+  padding-left: 1rem;
+}
+.blizz-content ul.blizz-list li {
+  position: relative;
+  margin: 0.25rem 0;
+  padding-left: 1rem;
+}
+.blizz-content ul.blizz-list li::before {
+  content: '•';
+  position: absolute;
+  left: 0;
+  color: #00aeff;
+}
+.blizz-content mark {
+  background: rgba(255, 215, 0, 0.15);
+  border-bottom: 1px solid rgba(255, 215, 0, 0.45);
+  color: #ffd76a;
+  padding: 0 2px;
+}
+
 .post-footer {
   display: flex;
   justify-content: space-between;
